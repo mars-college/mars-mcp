@@ -1,0 +1,25 @@
+# systemd --user unit for the `mars` account on eden2.
+#
+#   install -D -m644 mars-mcp.service ~/.config/systemd/user/mars-mcp.service
+#   systemctl --user daemon-reload && systemctl --user enable --now mars-mcp
+#
+# Requires `loginctl enable-linger mars` (already done) so it survives logout.
+[Unit]
+Description=Mars College MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=CONTAINER=mars-mcp
+EnvironmentFile=%h/mars-mcp.env
+ExecStartPre=-/usr/bin/podman rm -f ${CONTAINER}
+ExecStart=/usr/bin/podman run --rm --name ${CONTAINER} \
+    --env-file %h/mars-mcp.env \
+    --publish 127.0.0.1:${PORT}:${PORT} \
+    localhost/mars-mcp:latest
+ExecStop=/usr/bin/podman stop -t 10 ${CONTAINER}
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
