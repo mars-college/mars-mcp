@@ -1,23 +1,30 @@
 # systemd --user unit for the `mars` account on eden2.
 #
+#   loginctl enable-linger mars          # required, or this dies at logout
 #   install -D -m644 mars-mcp.service ~/.config/systemd/user/mars-mcp.service
 #   systemctl --user daemon-reload && systemctl --user enable --now mars-mcp
-#
-# Requires `loginctl enable-linger mars` (already done) so it survives logout.
 [Unit]
 Description=Mars College MCP server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Declared here rather than read from the env file: systemd only needs the port to
+# build the publish flag, and sourcing the env file would also copy
+# MARS_STUB_TOKENS into the podman client's own environment (/proc/<pid>/environ)
+# and run the secrets through a second, differently-quoting parser.
 Environment=CONTAINER=mars-mcp
-EnvironmentFile=%h/mars-mcp.env
+Environment=PORT=4400
+# --init gives the container a real init as PID 1 so SIGTERM is delivered rather
+# than dropped; without it every restart waits out the full stop timeout and then
+# SIGKILLs, severing in-flight responses.
 ExecStartPre=-/usr/bin/podman rm -f ${CONTAINER}
-ExecStart=/usr/bin/podman run --rm --name ${CONTAINER} \
+ExecStart=/usr/bin/podman run --rm --init --name ${CONTAINER} \
     --env-file %h/mars-mcp.env \
     --publish 127.0.0.1:${PORT}:${PORT} \
     localhost/mars-mcp:latest
 ExecStop=/usr/bin/podman stop -t 10 ${CONTAINER}
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5s
 

@@ -59,7 +59,10 @@ export function registerMarsTools(server: McpServer): void {
         };
       }
 
-      const fact = FACTS[topic];
+      // Object.hasOwn, not a bare index: inherited keys such as "constructor",
+      // "toString" and "__proto__" are truthy, so a bare lookup skipped the guard
+      // below and returned a successful-looking "undefined\n\nundefined".
+      const fact = Object.hasOwn(FACTS, topic) ? FACTS[topic] : undefined;
       if (!fact) {
         return {
           isError: true,

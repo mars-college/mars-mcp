@@ -9,12 +9,14 @@ import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.
  * *resource server* that only validates tokens, while a separate *authorization
  * server* handles Martian login, consent and issuance. That split is deliberate and
  * this file is the seam — swapping the stub for real JWT/introspection validation
- * should not require touching anything else.
+ * means replacing `createVerifier()` and nothing outside this file.
  *
  * Until an authorization server is chosen, tokens come from a static allowlist in
  * MARS_STUB_TOKENS. This is not suitable for anything but development.
  *
- * Format: comma-separated `token:subject:scope|scope` entries.
+ * Format: comma-separated `token:subject:scope|scope` entries. Tokens and subjects
+ * may not themselves contain `:` — a malformed entry is rejected at startup rather
+ * than silently truncated.
  */
 export interface StubToken {
   token: string;
@@ -22,23 +24,60 @@ export interface StubToken {
   scopes: string[];
 }
 
+/**
+ * Entries are secrets, so parse errors identify the offending entry by position
+ * only. Printing the entry would put a live bearer token into the journal.
+ */
 export function parseStubTokens(raw: string | undefined): StubToken[] {
   if (!raw) return [];
-  return raw
+
+  const parsed: StubToken[] = [];
+  const seen = new Set<string>();
+
+  raw
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean)
-    .map((entry) => {
-      const [token, subject, scopes] = entry.split(':');
-      if (!token || !subject) {
-        throw new Error(`MARS_STUB_TOKENS entry is malformed: "${entry}"`);
+    .forEach((entry, index) => {
+      const position = `entry ${index + 1}`;
+      const fields = entry.split(':').map((field) => field.trim());
+
+      if (fields.length !== 3) {
+        throw new Error(
+          `MARS_STUB_TOKENS ${position} is malformed: expected ` +
+            `token:subject:scope|scope, got ${fields.length} colon-separated ` +
+            `field(s). Tokens and subjects may not contain ":".`,
+        );
       }
-      return {
-        token,
-        subject,
-        scopes: (scopes ?? '').split('|').map((s) => s.trim()).filter(Boolean),
-      };
+
+      const [token, subject, scopeField] = fields as [string, string, string];
+      if (!token || !subject) {
+        throw new Error(`MARS_STUB_TOKENS ${position} has an empty token or subject.`);
+      }
+
+      const scopes = scopeField
+        .split('|')
+        .map((scope) => scope.trim())
+        .filter(Boolean);
+      if (scopes.length === 0) {
+        throw new Error(
+          `MARS_STUB_TOKENS ${position} ("${subject}") lists no scopes, so every ` +
+            `request using it would be rejected.`,
+        );
+      }
+
+      if (seen.has(token)) {
+        throw new Error(
+          `MARS_STUB_TOKENS ${position} duplicates an earlier token; the later ` +
+            `entry would silently shadow it.`,
+        );
+      }
+      seen.add(token);
+
+      parsed.push({ token, subject, scopes });
     });
+
+  return parsed;
 }
 
 /** Stub tokens do not really expire, but the SDK requires an expiry — mint a rolling one. */
@@ -46,12 +85,12 @@ const STUB_TTL_SECONDS = 60 * 60;
 
 export class StubTokenVerifier implements OAuthTokenVerifier {
   private readonly byToken: Map<string, StubToken>;
+  private readonly resourceUrl: URL;
 
-  constructor(
-    tokens: StubToken[],
-    private readonly resource: string,
-  ) {
+  constructor(tokens: StubToken[], resource: string) {
     this.byToken = new Map(tokens.map((t) => [t.token, t]));
+    // Constant for the process lifetime; building it per request allocates for nothing.
+    this.resourceUrl = new URL(resource);
   }
 
   get size(): number {
@@ -61,16 +100,43 @@ export class StubTokenVerifier implements OAuthTokenVerifier {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const match = this.byToken.get(token);
     if (!match) {
-      throw new InvalidTokenError('Unknown or expired access token');
+      // Deliberately not "or expired": a stub token cannot expire, so saying so
+      // would send an operator chasing the wrong hypothesis.
+      throw new InvalidTokenError('Unrecognized access token');
     }
     return {
       token,
       // With a real authorization server these come from the token itself.
       clientId: match.subject,
       scopes: match.scopes,
-      resource: new URL(this.resource),
+      // Reserved for RFC 8707 audience binding. Nothing enforces it yet — the SDK's
+      // bearer middleware checks scopes and expiry only — so a real verifier must
+      // compare the token's `aud` against this itself.
+      resource: this.resourceUrl,
       expiresAt: Math.floor(Date.now() / 1000) + STUB_TTL_SECONDS,
       extra: { subject: match.subject },
     };
   }
+}
+
+/**
+ * The seam. Owns its own configuration so the rest of the app depends only on the
+ * `OAuthTokenVerifier` interface — a real JWT or introspection verifier drops in
+ * here without `index.ts` changing.
+ */
+export function createVerifier(resource: string): OAuthTokenVerifier {
+  const verifier = new StubTokenVerifier(
+    parseStubTokens(process.env.MARS_STUB_TOKENS),
+    resource,
+  );
+  if (verifier.size === 0) {
+    console.warn(
+      '[mars-mcp] MARS_STUB_TOKENS is empty — every request will be rejected. ' +
+        'Set it in .env (see .env.example).',
+    );
+  } else {
+    // Count only, never the tokens themselves.
+    console.log(`[mars-mcp] stub tokens  ${verifier.size}`);
+  }
+  return verifier;
 }

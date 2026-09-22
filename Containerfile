@@ -4,15 +4,20 @@ FROM docker.io/library/node:22-alpine
 
 WORKDIR /app
 
+# Install the full tree once, compile, then drop dev deps. An earlier
+# `npm ci --omit=dev` pass was removed: `npm ci` wipes node_modules before
+# installing, so it was rebuilt from scratch anyway and its layer survived in the
+# image as a whited-out duplicate.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
-
 COPY tsconfig.json ./
 COPY src ./src
-# Dev deps are needed only to compile; drop them from the final layer.
 RUN npm ci --no-audit --no-fund \
  && npm run build \
  && npm prune --omit=dev
+
+# Must come after the build, or npm ci would skip devDependencies. Also stops
+# Express rendering stack traces into error responses.
+ENV NODE_ENV=production
 
 USER node
 EXPOSE 4400
