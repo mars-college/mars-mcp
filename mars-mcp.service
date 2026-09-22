@@ -24,8 +24,19 @@ Environment=PORT=4400
 # than dropped; without it every restart waits out the full stop timeout and then
 # SIGKILLs, severing in-flight responses.
 ExecStartPre=-/usr/bin/podman rm -f ${CONTAINER}
+# The Discord archive is mounted READ-ONLY from a 0700 mars:mars directory on the
+# host. It is deliberately NOT copied into the image: the image is rebuilt on every
+# deploy and its layers are readable by anyone who can pull it, while the host
+# directory is unreadable to uid 1000 (eden), which is what the eden3 API and the
+# OpenClaw agent gateway run as. The MCP server is the only thing that opens it.
+# --userns=keep-id:uid=1000,gid=1000 maps the host `mars` account onto the image's
+# `node` user. Without it, rootless podman maps container uid 1000 into mars's
+# subuid range (166535), which cannot read a 0700 mars:mars directory — the
+# archive mount would silently be Permission denied.
 ExecStart=/usr/bin/podman run --rm --init --name ${CONTAINER} \
     --env-file %h/mars-mcp.env \
+    --userns=keep-id:uid=1000,gid=1000 \
+    --volume /srv/mars-mcp-data:/data:ro \
     --publish 127.0.0.1:${PORT}:${PORT} \
     localhost/mars-mcp:latest
 ExecStop=/usr/bin/podman stop -t 10 ${CONTAINER}

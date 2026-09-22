@@ -53,6 +53,45 @@ That responds as an SSE stream (`content-type: text/event-stream`), not plain
 JSON — the payload is on a `data:` line, so piping it straight to `jq` will not
 work.
 
+## The Mars Discord archive
+
+The server carries a read-only copy of the Mars Discord archive — **41,374 files,
+26,280 JSON + 15,093 Markdown** (chronology, events, links, media *metadata*,
+places, projects, senders, themes, traditions). No media files; the 93 GB raw
+export is deliberately not here.
+
+**The MCP server is the only thing that can open it.** That is the point of the
+arrangement, so the constraints below are load-bearing rather than incidental:
+
+| | |
+|---|---|
+| On the host | `/srv/mars-mcp-data/discord`, `0700 mars:mars` |
+| In the container | `/data/discord`, mounted **read-only** |
+| Config | `DISCORD_ARCHIVE_DIR=/data/discord` |
+| Readable by | `mars` only — uid 1000 (`eden`), which the eden3 API and the OpenClaw agent gateway run as, gets `Permission denied` |
+
+Agents do **not** get a filesystem path to this. They reach it only by calling an
+authenticated MCP tool, which is where authorization and redaction belong.
+
+Three things not to undo:
+
+- **Never `COPY` the archive into the image.** It is mounted precisely because
+  image layers are readable by anyone who can pull the image, and the image is
+  rebuilt on every deploy.
+- **Keep the mount `:ro`** and the host directory `0700`.
+- **Keep `--userns=keep-id:uid=1000,gid=1000`** in the unit. Without it rootless
+  Podman maps container uid 1000 into `mars`'s subuid range (166535), which cannot
+  read a `0700 mars:mars` directory — the mount silently becomes Permission denied.
+
+### The one gap this does not close
+
+`eden` is in the `docker` group and `/var/run/docker.sock` is root-equivalent by
+design. A process that can drive that socket can bind-mount any host path into a
+container it creates, including this one. Filesystem permissions stop an agent
+reading the archive directly; they do not stop something with full Docker control.
+Closing that would mean taking `eden` out of the `docker` group or brokering the
+OpenClaw stack's container operations, neither of which is in scope here.
+
 ## The tool
 
 One tool so far, `mars_lookup`:
@@ -155,7 +194,10 @@ excluding if tools ever stream progress.
 - [ ] Choose an authorization server and replace `StubTokenVerifier`, and resolve
       the `authorization_servers` gap above
 - [ ] Decide what "authenticated Martian" means and where that roster lives
-- [ ] Replace the hardcoded facts with real sources
+- [ ] Build the archive-backed tools — the Discord corpus is on the box at
+      `/data/discord`; `mars_lookup`'s two hardcoded facts are still placeholders
+- [ ] Decide what a Martian is allowed to see: the archive is private community
+      history, so authorization and redaction are a product decision, not just auth
 - [ ] Add a test suite — there is currently no test runner
 - [ ] Add CORS + rate limiting before any browser client or public rollout
 - [x] ~~DNS A record + Caddy vhost~~ — done 2026-09-22, cert issued
