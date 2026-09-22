@@ -22,16 +22,36 @@ function env(name: string, fallback: string): string {
 }
 
 const BIND_HOST = env('BIND_HOST', '127.0.0.1');
-const PORT = Number(env('PORT', '4400'));
-if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-  throw new Error(`PORT must be an integer 1-65535, got "${process.env.PORT}"`);
+const PORT_RAW = env('PORT', '4400');
+// Decimal digits only: Number() would happily read "0x10" as 16 and "4.49e3" as
+// 4490, which is precisely the env-file typo this check exists to catch.
+// No leading zeros either: "08" is a typo for 8 or 80 far more often than it is
+// a deliberate request for port 8.
+if (!/^[1-9]\d*$/.test(PORT_RAW)) {
+  throw new Error(`PORT must be decimal digits without a leading zero, got "${PORT_RAW}"`);
+}
+const PORT = Number(PORT_RAW);
+if (PORT < 1 || PORT > 65535) {
+  throw new Error(`PORT must be 1-65535, got "${PORT_RAW}"`);
 }
 
 const PUBLIC_URL = env('PUBLIC_URL', `http://localhost:${PORT}`);
 const AUTH_ISSUER_URL = env('AUTH_ISSUER_URL', PUBLIC_URL);
 const SCOPES = ['mars.read'];
 
-const verifier = createVerifier(PUBLIC_URL);
+/**
+ * The canonical resource identifier for an MCP server is its endpoint URL, not the
+ * bare origin. RFC 9728 path insertion means a client derives the metadata URL from
+ * it, and then expects the returned document's `resource` to match what it asked
+ * for — so both must agree on `<origin>/mcp`.
+ */
+const RESOURCE_ID = new URL('/mcp', PUBLIC_URL).toString();
+const resourceMetadataUrl = new URL(
+  '/.well-known/oauth-protected-resource/mcp',
+  PUBLIC_URL,
+).toString();
+
+const verifier = createVerifier(RESOURCE_ID);
 
 /**
  * A fresh server + transport per request (stateless mode). Nothing is pinned to
@@ -50,11 +70,6 @@ function buildServer(): McpServer {
 const app = express();
 app.disable('x-powered-by');
 
-const resourceMetadataUrl = new URL(
-  '/.well-known/oauth-protected-resource',
-  PUBLIC_URL,
-).toString();
-
 /**
  * RFC 9728 protected-resource metadata. Clients fetch this (pointed here by the
  * WWW-Authenticate header on a 401) to discover which authorization server to
@@ -67,7 +82,7 @@ const resourceMetadataUrl = new URL(
  * canonical URL is `<origin>/mcp`, and only some fall back to the root.
  */
 const protectedResourceMetadata = {
-  resource: PUBLIC_URL,
+  resource: RESOURCE_ID,
   authorization_servers: [AUTH_ISSUER_URL],
   scopes_supported: SCOPES,
   bearer_methods_supported: ['header'],
@@ -104,11 +119,13 @@ app.post('/mcp', auth, parseJson, async (req, res) => {
     sessionIdGenerator: undefined, // stateless
   });
 
-  // Without these, the SDK swallows transport-level failures (bad Accept header,
+  // Without this the SDK swallows transport-level failures (bad Accept header,
   // unsupported content type, "no connection established for request id") and a
   // failed request produces no server-side log line at all.
+  //
+  // Only ONE hook: Protocol.connect() chains rather than replaces this handler, so
+  // also setting `server.server.onerror` logged every error twice.
   transport.onerror = (err) => console.error('[mars-mcp] transport error:', err);
-  server.server.onerror = (err) => console.error('[mars-mcp] protocol error:', err);
 
   res.on('close', () => {
     // `void` discards the promise but does not catch it; an onclose hook that
@@ -160,18 +177,39 @@ const jsonRpcErrors: ErrorRequestHandler = (err, _req, res, next) => {
       ? (err as { status: number }).status
       : 500;
   const clientFault = status >= 400 && status < 500;
+  const type = (err as { type?: unknown }).type;
 
-  if (!clientFault) console.error('[mars-mcp] unhandled error:', err);
+  // -32700 is specifically "Parse error"; anything else client-side is -32600.
+  const [code, message] =
+    !clientFault
+      ? [-32603, 'Internal server error']
+      : type === 'entity.parse.failed'
+        ? [-32700, 'Parse error']
+        : [-32600, 'Invalid Request'];
+
+  if (clientFault) {
+    // One line, no stack: enough to spot a client hammering the endpoint, without
+    // handing an unrated-limited path a log-amplification lever.
+    console.warn(`[${SERVICE}] rejected request: ${status} ${String(type ?? 'unknown')}`);
+  } else {
+    console.error(`[${SERVICE}] unhandled error:`, err);
+  }
 
   res.status(status).json({
     jsonrpc: '2.0',
-    error: {
-      code: clientFault ? -32700 : -32603,
-      message: clientFault ? 'Invalid request' : 'Internal server error',
-    },
+    error: { code, message },
     id: null,
   });
 };
+// Unmatched routes never reach the error handler, so they returned Express HTML.
+app.use((_req, res) => {
+  res.status(404).json({
+    jsonrpc: '2.0',
+    error: { code: -32601, message: 'Not found' },
+    id: null,
+  });
+});
+
 app.use(jsonRpcErrors);
 
 const httpServer = app.listen(PORT, BIND_HOST, () => {
@@ -185,12 +223,16 @@ httpServer.on('error', (err) => {
 });
 
 /**
- * The container runs node as PID 1, where signals with a default disposition are
- * dropped. Without an explicit handler `podman stop` waits out its full timeout on
- * every restart and then SIGKILLs, severing in-flight responses mid-stream.
+ * Without an explicit handler, `podman stop` waits out its full timeout on every
+ * restart and then SIGKILLs, severing in-flight responses mid-stream. The unit also
+ * passes --init so node is not PID 1 (where a default-disposition signal would be
+ * dropped outright); this handler is what actually drains, belt and braces.
  */
+let shuttingDown = false;
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`[${SERVICE}] ${signal} received, shutting down`);
     httpServer.close(() => process.exit(0));
     // Don't let a hung keep-alive connection hold the process open forever.

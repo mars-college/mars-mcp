@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Mars College MCP server \u2014 Mars info for authenticated Martians' agents",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.9"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

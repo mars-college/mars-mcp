@@ -13,6 +13,11 @@ Wants=network-online.target
 # build the publish flag, and sourcing the env file would also copy
 # MARS_STUB_TOKENS into the podman client's own environment (/proc/<pid>/environ)
 # and run the secrets through a second, differently-quoting parser.
+#
+# TRADE-OFF: this PORT and the PORT in ~/mars-mcp.env are now two separate values
+# and MUST match. If they diverge, podman publishes a port nothing is listening on,
+# every request through Caddy gets connection-refused, and the unit still reports
+# active (running) with nothing in the log.
 Environment=CONTAINER=mars-mcp
 Environment=PORT=4400
 # --init gives the container a real init as PID 1 so SIGTERM is delivered rather

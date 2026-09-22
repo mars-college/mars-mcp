@@ -25,8 +25,9 @@ export interface StubToken {
 }
 
 /**
- * Entries are secrets, so parse errors identify the offending entry by position
- * only. Printing the entry would put a live bearer token into the journal.
+ * Entries are secrets, so parse errors identify the offending entry by position,
+ * never by content. (One branch names the subject, which is an identity, not a
+ * credential.) Printing the entry itself would put a live bearer token in the journal.
  */
 export function parseStubTokens(raw: string | undefined): StubToken[] {
   if (!raw) return [];
@@ -50,7 +51,7 @@ export function parseStubTokens(raw: string | undefined): StubToken[] {
         );
       }
 
-      const [token, subject, scopeField] = fields as [string, string, string];
+      const [token = '', subject = '', scopeField = ''] = fields;
       if (!token || !subject) {
         throw new Error(`MARS_STUB_TOKENS ${position} has an empty token or subject.`);
       }
@@ -125,10 +126,23 @@ export class StubTokenVerifier implements OAuthTokenVerifier {
  * here without `index.ts` changing.
  */
 export function createVerifier(resource: string): OAuthTokenVerifier {
-  const verifier = new StubTokenVerifier(
-    parseStubTokens(process.env.MARS_STUB_TOKENS),
-    resource,
-  );
+  // A bad entry must not take the process down. Throwing here happens at module
+  // scope, before listen(), so `Restart=on-failure` would crash-loop forever with
+  // no /healthz to tell an operator "bad config" apart from "box is down".
+  // Starting with zero tokens fails closed — every request 401s — while keeping
+  // the health probe green and the reason in the journal.
+  let tokens: StubToken[] = [];
+  try {
+    tokens = parseStubTokens(process.env.MARS_STUB_TOKENS);
+  } catch (err) {
+    console.error(
+      '[mars-mcp] MARS_STUB_TOKENS could not be parsed; starting with NO tokens, ' +
+        'so every request will be rejected:',
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  const verifier = new StubTokenVerifier(tokens, resource);
   if (verifier.size === 0) {
     console.warn(
       '[mars-mcp] MARS_STUB_TOKENS is empty — every request will be rejected. ' +
