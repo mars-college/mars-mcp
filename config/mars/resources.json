@@ -1,0 +1,11 @@
+{
+  "resources": [
+    {
+      "uri": "mars://demo/role-gated",
+      "name": "Mars role-gated demonstration",
+      "description": "A synthetic document for demonstrating Discord-inherited access.",
+      "file": "role-gated.txt",
+      "allowRoles": ["demo-reader"]
+    }
+  ]
+}

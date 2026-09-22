@@ -5,13 +5,15 @@
   "type": "module",
   "description": "Mars College MCP server \u2014 Mars info for authenticated Martians' agents",
   "engines": {
-    "node": ">=22.9"
+    "node": ">=22.13"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node --env-file-if-exists=.env dist/index.js",
-    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "start": "node --experimental-sqlite --env-file-if-exists=.env dist/index.js",
+    "dev": "node --experimental-sqlite --import tsx --watch --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
+    "test:helper": "python3 tests/helper.test.py"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

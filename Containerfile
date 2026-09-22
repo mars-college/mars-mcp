@@ -15,10 +15,14 @@ RUN npm ci --no-audit --no-fund \
  && npm run build \
  && npm prune --omit=dev
 
+# Only synthetic RBAC demonstration data. Never copy the private archive here.
+COPY config/mars/resources.json ./config/mars/resources.json
+COPY resources/demo/role-gated.txt ./resources/demo/role-gated.txt
+
 # Must come after the build, or npm ci would skip devDependencies. Also stops
 # Express rendering stack traces into error responses.
 ENV NODE_ENV=production
 
 USER node
 EXPOSE 4400
-CMD ["node", "dist/index.js"]
+CMD ["node", "--experimental-sqlite", "dist/index.js"]

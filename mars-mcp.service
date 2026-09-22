@@ -11,7 +11,7 @@ Wants=network-online.target
 [Service]
 # Declared here rather than read from the env file: systemd only needs the port to
 # build the publish flag, and sourcing the env file would also copy
-# MARS_STUB_TOKENS into the podman client's own environment (/proc/<pid>/environ)
+# DISCORD_CLIENT_SECRET into the podman client's own environment (/proc/<pid>/environ)
 # and run the secrets through a second, differently-quoting parser.
 #
 # TRADE-OFF: this PORT and the PORT in ~/mars-mcp.env are now two separate values
@@ -36,7 +36,9 @@ ExecStartPre=-/usr/bin/podman rm -f ${CONTAINER}
 ExecStart=/usr/bin/podman run --rm --init --name ${CONTAINER} \
     --env-file %h/mars-mcp.env \
     --userns=keep-id:uid=1000,gid=1000 \
+    --env AUTH_DATABASE_PATH=/state/auth.sqlite \
     --volume /srv/mars-mcp-data:/data:ro \
+    --volume /srv/mars-mcp-state:/state:rw \
     --publish 127.0.0.1:${PORT}:${PORT} \
     localhost/mars-mcp:latest
 ExecStop=/usr/bin/podman stop -t 10 ${CONTAINER}

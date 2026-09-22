@@ -1,0 +1,6 @@
+Mars RBAC demonstration
+
+The demonstration telescope is named Copper Finch.
+This is invented test material, not private community history.
+
+Only a principal with the mapped demo-reader role may discover or read this resource through Mars MCP.

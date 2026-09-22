@@ -1,156 +1,136 @@
-import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import type { Response } from 'express';
+import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
+import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { InvalidClientMetadataError, InvalidGrantError, InvalidRequestError, InvalidScopeError, InvalidTargetError, InvalidTokenError, UnsupportedGrantTypeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js';
+import { AuthStore, hash, now, secret } from './auth-store.js';
+import type { AuthConfig, AuthorizationCode, LoginFlow, Principal, StoredAccess } from './auth-types.js';
 
-/**
- * TEMPORARY token verification.
- *
- * The MCP authorization spec splits responsibilities: this process is an OAuth 2.1
- * *resource server* that only validates tokens, while a separate *authorization
- * server* handles Martian login, consent and issuance. That split is deliberate and
- * this file is the seam — swapping the stub for real JWT/introspection validation
- * means replacing `createVerifier()` and nothing outside this file.
- *
- * Until an authorization server is chosen, tokens come from a static allowlist in
- * MARS_STUB_TOKENS. This is not suitable for anything but development.
- *
- * Format: comma-separated `token:subject:scope|scope` entries. Tokens and subjects
- * may not themselves contain `:` — a malformed entry is rejected at startup rather
- * than silently truncated.
- */
-export interface StubToken {
-  token: string;
-  subject: string;
-  scopes: string[];
+const DEVICE_CLIENT = 'mars-agent-helper';
+const SCOPE = 'mars.read';
+
+export function validRedirect(value: string): boolean {
+  if (value.length > 2048 || value.includes('*') || value.includes('#')) return false;
+  try {
+    const url = new URL(value);
+    return !url.username && !url.password && (url.protocol === 'https:' ||
+      (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) &&
+      url.href === value;
+  } catch { return false; }
 }
 
-/**
- * Entries are secrets, so parse errors identify the offending entry by position,
- * never by content. (One branch names the subject, which is an identity, not a
- * credential.) Printing the entry itself would put a live bearer token in the journal.
- */
-export function parseStubTokens(raw: string | undefined): StubToken[] {
-  if (!raw) return [];
+export class MarsAuthProvider implements OAuthServerProvider {
+  readonly clientsStore: OAuthRegisteredClientsStore;
 
-  const parsed: StubToken[] = [];
-  const seen = new Set<string>();
-
-  raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .forEach((entry, index) => {
-      const position = `entry ${index + 1}`;
-      const fields = entry.split(':').map((field) => field.trim());
-
-      if (fields.length !== 3) {
-        throw new Error(
-          `MARS_STUB_TOKENS ${position} is malformed: expected ` +
-            `token:subject:scope|scope, got ${fields.length} colon-separated ` +
-            `field(s). Tokens and subjects may not contain ":".`,
-        );
-      }
-
-      const [token = '', subject = '', scopeField = ''] = fields;
-      if (!token || !subject) {
-        throw new Error(`MARS_STUB_TOKENS ${position} has an empty token or subject.`);
-      }
-
-      const scopes = scopeField
-        .split('|')
-        .map((scope) => scope.trim())
-        .filter(Boolean);
-      if (scopes.length === 0) {
-        throw new Error(
-          `MARS_STUB_TOKENS ${position} ("${subject}") lists no scopes, so every ` +
-            `request using it would be rejected.`,
-        );
-      }
-
-      if (seen.has(token)) {
-        throw new Error(
-          `MARS_STUB_TOKENS ${position} duplicates an earlier token; the later ` +
-            `entry would silently shadow it.`,
-        );
-      }
-      seen.add(token);
-
-      parsed.push({ token, subject, scopes });
-    });
-
-  return parsed;
-}
-
-/** Stub tokens do not really expire, but the SDK requires an expiry — mint a rolling one. */
-const STUB_TTL_SECONDS = 60 * 60;
-
-export class StubTokenVerifier implements OAuthTokenVerifier {
-  private readonly byToken: Map<string, StubToken>;
-  private readonly resourceUrl: URL;
-
-  constructor(tokens: StubToken[], resource: string) {
-    this.byToken = new Map(tokens.map((t) => [t.token, t]));
-    // Constant for the process lifetime; building it per request allocates for nothing.
-    this.resourceUrl = new URL(resource);
+  constructor(private readonly store: AuthStore, private readonly config: AuthConfig) {
+    this.clientsStore = {
+      getClient: (id) => id === DEVICE_CLIENT ? undefined : store.get<OAuthClientInformationFull>('client', id),
+      registerClient: (input) => {
+        const grants = input.grant_types ?? ['authorization_code'];
+        const responses = input.response_types ?? ['code'];
+        if (input.token_endpoint_auth_method !== 'none' || input.client_secret ||
+            !grants.includes('authorization_code') || grants.some(grant => !['authorization_code', 'refresh_token'].includes(grant)) ||
+            responses.length !== 1 || responses[0] !== 'code' ||
+            (input.scope !== undefined && input.scope !== SCOPE) ||
+            input.redirect_uris.length < 1 || input.redirect_uris.length > 10 ||
+            !input.redirect_uris.every(validRedirect)) {
+          throw new InvalidClientMetadataError('Public authorization-code clients require HTTPS or loopback redirects and mars.read scope');
+        }
+        const client: OAuthClientInformationFull = {
+          client_id: secret(), client_id_issued_at: now(),
+          client_name: input.client_name?.slice(0, 200),
+          redirect_uris: [...new Set(input.redirect_uris)],
+          token_endpoint_auth_method: 'none', grant_types: ['authorization_code'],
+          response_types: ['code'], scope: SCOPE,
+        };
+        store.put('client', client.client_id, client, Number.MAX_SAFE_INTEGER);
+        return client;
+      },
+    };
   }
 
-  get size(): number {
-    return this.byToken.size;
+  async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+    if (!this.config.discordClientId || !this.config.discordClientSecret || !this.config.discordGuildId) {
+      res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Discord authorization is not configured' });
+      return;
+    }
+    // RFC 8252 permits native clients to change only the loopback callback port.
+    if (!validRedirect(params.redirectUri) || !client.redirect_uris.some(uri => redirectUriMatches(params.redirectUri, uri))) {
+      res.status(400).json({ error: 'invalid_request', error_description: 'Unregistered redirect URI' });
+      return;
+    }
+    if (params.resource?.href !== this.config.resource) throw new InvalidTargetError('The mars resource is required');
+    if (params.scopes?.length && (params.scopes.length !== 1 || params.scopes[0] !== SCOPE)) throw new InvalidScopeError('Only mars.read is supported');
+    if (!/^[A-Za-z0-9_-]{43}$/.test(params.codeChallenge)) throw new InvalidRequestError('A valid S256 PKCE challenge is required');
+    const flowId = secret();
+    const flow: LoginFlow = {
+      kind: 'oauth', clientId: client.client_id, clientName: client.client_name ?? 'Unnamed client',
+      resource: this.config.resource, scope: SCOPE, expiresAt: now() + 600,
+      status: 'pending', redirectUri: params.redirectUri, state: params.state,
+      codeChallenge: params.codeChallenge,
+    };
+    this.store.put('flow', flowId, flow, flow.expiresAt);
+    res.redirect(`${this.config.issuer}/auth/start?flow=${flowId}`);
+  }
+
+  private code(clientId: string, code: string): AuthorizationCode {
+    const entry = this.store.get<AuthorizationCode>('code', hash(code));
+    if (!entry || entry.clientId !== clientId) throw new InvalidGrantError('Invalid authorization code');
+    return entry;
+  }
+
+  async challengeForAuthorizationCode(client: OAuthClientInformationFull, code: string): Promise<string> {
+    return this.code(client.client_id, code).codeChallenge;
+  }
+
+  async exchangeAuthorizationCode(client: OAuthClientInformationFull, code: string, verifier?: string, redirectUri?: string, resource?: URL): Promise<OAuthTokens> {
+    return this.store.transaction(() => {
+      const entry = this.code(client.client_id, code);
+      if (entry.redirectUri !== redirectUri || !client.redirect_uris.some(uri => redirectUriMatches(entry.redirectUri, uri))) throw new InvalidGrantError('Redirect URI mismatch');
+      if (resource?.href !== this.config.resource || entry.resource !== this.config.resource) throw new InvalidTargetError('Resource mismatch');
+      // The SDK validates PKCE before invoking this method, and then omits the verifier.
+      if (verifier !== undefined) {
+        const actual = createHash('sha256').update(verifier).digest('base64url');
+        if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) || actual.length !== entry.codeChallenge.length ||
+            !timingSafeEqual(Buffer.from(actual), Buffer.from(entry.codeChallenge))) throw new InvalidGrantError('PKCE mismatch');
+      }
+      if (entry.scope !== SCOPE) throw new InvalidScopeError('Only mars.read is supported');
+      const tokens = this.issueAccess(client.client_id, entry.principal);
+      this.store.delete('code', hash(code));
+      return tokens;
+    });
+  }
+
+  async exchangeRefreshToken(): Promise<OAuthTokens> {
+    throw new UnsupportedGrantTypeError('Refresh tokens are not supported; authorize again');
+  }
+
+  issueAccess(clientId: string, principal: Principal): OAuthTokens {
+    const time = now();
+    const expiresAt = principal.membershipAt + Math.min(this.config.sessionTtl, 900);
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= time || principal.membershipAt > time) throw new InvalidGrantError('Membership authorization has expired');
+    const token = secret();
+    const access: StoredAccess = { clientId, resource: this.config.resource, scopes: [SCOPE], principal, expiresAt };
+    this.store.put('access', hash(token), access, expiresAt);
+    return { access_token: token, token_type: 'Bearer', expires_in: expiresAt - time, scope: SCOPE };
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const match = this.byToken.get(token);
-    if (!match) {
-      // Deliberately not "or expired": a stub token cannot expire, so saying so
-      // would send an operator chasing the wrong hypothesis.
-      throw new InvalidTokenError('Unrecognized access token');
-    }
-    return {
-      token,
-      // With a real authorization server these come from the token itself.
-      clientId: match.subject,
-      scopes: match.scopes,
-      // Reserved for RFC 8707 audience binding. Nothing enforces it yet — the SDK's
-      // bearer middleware checks scopes and expiry only — so a real verifier must
-      // compare the token's `aud` against this itself.
-      resource: this.resourceUrl,
-      expiresAt: Math.floor(Date.now() / 1000) + STUB_TTL_SECONDS,
-      extra: { subject: match.subject },
-    };
-  }
-}
-
-/**
- * The seam. Owns its own configuration so the rest of the app depends only on the
- * `OAuthTokenVerifier` interface — a real JWT or introspection verifier drops in
- * here without `index.ts` changing.
- */
-export function createVerifier(resource: string): OAuthTokenVerifier {
-  // A bad entry must not take the process down. Throwing here happens at module
-  // scope, before listen(), so `Restart=on-failure` would crash-loop forever with
-  // no /healthz to tell an operator "bad config" apart from "box is down".
-  // Starting with zero tokens fails closed — every request 401s — while keeping
-  // the health probe green and the reason in the journal.
-  let tokens: StubToken[] = [];
-  try {
-    tokens = parseStubTokens(process.env.MARS_STUB_TOKENS);
-  } catch (err) {
-    console.error(
-      '[mars-mcp] MARS_STUB_TOKENS could not be parsed; starting with NO tokens, ' +
-        'so every request will be rejected:',
-      err instanceof Error ? err.message : err,
-    );
+    const entry = this.store.get<StoredAccess>('access', hash(token));
+    if (!entry || entry.resource !== this.config.resource || entry.expiresAt <= now()) throw new InvalidTokenError('Invalid or expired access token');
+    return { token, clientId: entry.clientId, scopes: entry.scopes, expiresAt: entry.expiresAt,
+      resource: new URL(entry.resource), extra: { ...entry.principal } };
   }
 
-  const verifier = new StubTokenVerifier(tokens, resource);
-  if (verifier.size === 0) {
-    console.warn(
-      '[mars-mcp] MARS_STUB_TOKENS is empty — every request will be rejected. ' +
-        'Set it in .env (see .env.example).',
-    );
-  } else {
-    // Count only, never the tokens themselves.
-    console.log(`[mars-mcp] stub tokens  ${verifier.size}`);
+  revokeAccess(token: string): void { this.store.delete('access', hash(token)); }
+
+  async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+    this.store.transaction(() => {
+      const entry = this.store.get<StoredAccess>('access', hash(request.token));
+      if (entry?.clientId === client.client_id) this.revokeAccess(request.token);
+    });
   }
-  return verifier;
 }

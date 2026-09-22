@@ -1,13 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-/**
- * Mars College knowledge tools.
- *
- * Today this is a single hardcoded tool that exists to prove the transport and
- * auth path end to end. Real sources (calendar, residents, camp logistics, the
- * handbook) get registered here the same way.
- */
+/** Static introductory facts. Role-gated file resources are registered separately. */
 
 interface MarsFact {
   summary: string;
