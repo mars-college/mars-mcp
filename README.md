@@ -3,6 +3,8 @@
 MCP server for Mars College. Authenticated Martians attach it to their agents to
 get Mars info.
 
+**Live at https://mcp.mars.college** (Let's Encrypt TLS via Caddy on eden2).
+
 Independent of Eden — it happens to run on the same Hetzner box (`eden2`) to reuse
 idle compute, under its own `mars` service account with rootless Podman, with no
 access to the eden3 stack.
@@ -75,18 +77,21 @@ install -D -m644 mars-mcp.service ~/.config/systemd/user/mars-mcp.service
 systemctl --user daemon-reload && systemctl --user enable --now mars-mcp
 ```
 
-Caddy vhost (host-level `/etc/caddy/Caddyfile` — back it up and
-`caddy validate` before reloading; it is shared with dev.eden.art and bp.eden.art):
+The Caddy vhost is already in place in the host-level `/etc/caddy/Caddyfile`:
 
 ```
 https://mcp.mars.college {
+	encode zstd gzip
 	reverse_proxy 127.0.0.1:4400
 }
 ```
+
+That file is shared with dev.eden.art and bp.eden.art — **always back it up and run
+`caddy validate` before reloading.**
 
 ## Next
 
 - [ ] Choose an authorization server and replace `StubTokenVerifier`
 - [ ] Decide what "authenticated Martian" means and where that roster lives
 - [ ] Replace the hardcoded facts with real sources
-- [ ] Add the DNS A record for `mcp.mars.college`, then the Caddy vhost
+- [x] ~~DNS A record + Caddy vhost~~ — done 2026-09-22, cert issued
