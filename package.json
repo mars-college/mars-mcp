@@ -1,0 +1,30 @@
+{
+  "name": "mars-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mars College MCP server \u2014 Mars info for authenticated Martians' agents",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --experimental-sqlite --env-file-if-exists=.env dist/index.js",
+    "dev": "node --experimental-sqlite --import tsx --watch --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
+    "test:helper": "python3 tests/helper.test.py",
+    "smoke": "node --experimental-sqlite scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.1.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.22.0",
+    "typescript": "^5.7.0"
+  }
+}
