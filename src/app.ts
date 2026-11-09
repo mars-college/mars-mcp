@@ -40,16 +40,6 @@ export function createApp(config: AuthConfig, options: MarsResourceOptions & Int
   }
   app.get('/healthz', (_req, res) => { res.json({ ok: true, service: SERVICE, version: VERSION }); });
 
-  // A real HTTPS parent supplies YouTube's required Referer; a top-level embed
-  // has none and renders error 153 even when Cuelight reports its page healthy.
-  app.get('/cuelight/youtube/:video', (req, res) => {
-    if (!/^[\w-]{11}$/.test(req.params.video)) { res.sendStatus(404); return; }
-    res.set({
-      'Referrer-Policy': 'strict-origin-when-cross-origin',
-      'Content-Security-Policy': "default-src 'none'; frame-src https://www.youtube.com; style-src 'unsafe-inline'; base-uri 'none'",
-    }).type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>YouTube · Cuelight</title><style>html,body,iframe{width:100%;height:100%;margin:0;border:0;overflow:hidden;background:#000}</style></head><body><iframe title="YouTube video" src="https://www.youtube.com/embed/${req.params.video}?autoplay=1&mute=1&playsinline=1" allow="autoplay; fullscreen; encrypted-media" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></body></html>`);
-  });
-
   // Bound parsers before the SDK's endpoints, without parsing unauthenticated MCP bodies.
   app.use(['/authorize', '/token', '/revoke'], express.urlencoded({ extended: false, limit: '16kb', parameterLimit: 30 }));
   app.use('/register', express.json({ limit: '16kb' }));
@@ -91,7 +81,7 @@ export function createApp(config: AuthConfig, options: MarsResourceOptions & Int
     const server = new McpServer({ name: SERVICE, version: VERSION }, { capabilities: { tools: {} } });
     registerMarsTools(server);
     registerMarsResources(server, req.auth!, catalog);
-    registerIntegrationTools(server, req.auth!, { ...integrationEnvironment(), ...options, playbackBaseUrl: config.issuer });
+    registerIntegrationTools(server, req.auth!, { ...integrationEnvironment(), ...options });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Deliberately avoid serializing transport exceptions or requests containing secrets.
     transport.onerror = () => console.error(`[${SERVICE}] MCP transport error`);

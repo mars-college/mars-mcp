@@ -3,11 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { videoMedia, type VideoOptions } from './cuelight-video.js';
 
-export interface IntegrationOptions {
+export interface IntegrationOptions extends VideoOptions {
   cuelightUrl?: string;
   cuelightToken?: string;
-  playbackBaseUrl?: string;
   gatewayUrl?: string;
   gatewayToken?: string;
   fetchIntegration?: typeof fetch;
@@ -15,20 +15,11 @@ export interface IntegrationOptions {
 
 export function integrationEnvironment(): IntegrationOptions {
   return { cuelightUrl: process.env.CUELIGHT_URL, cuelightToken: process.env.CUELIGHT_TOKEN,
-    gatewayUrl: process.env.MARS_GATEWAY_URL, gatewayToken: process.env.MARS_GATEWAY_TOKEN };
+    gatewayUrl: process.env.MARS_GATEWAY_URL, gatewayToken: process.env.MARS_GATEWAY_TOKEN,
+    ytDlpPath: process.env.CUELIGHT_YT_DLP, ffmpegPath: process.env.CUELIGHT_FFMPEG,
+    videoScratchDir: process.env.CUELIGHT_VIDEO_SCRATCH };
 }
 
-// YouTube watch pages are navigation UI, not autoplay surfaces.
-export function playbackUrl(value: string, baseUrl: string): string {
-  const url = new URL(value);
-  const host = url.hostname.toLowerCase().replace(/^www\./, '');
-  const video = host === 'youtu.be' ? url.pathname.slice(1).split('/')[0]
-    : ['youtube.com', 'm.youtube.com'].includes(host)
-      ? (url.pathname === '/watch' ? url.searchParams.get('v') : /^\/(?:embed|shorts|live)\/([^/]+)/.exec(url.pathname)?.[1])
-      : undefined;
-  if (!video || !/^[\w-]{11}$/.test(video)) return value;
-  return `${baseUrl.replace(/\/$/, '')}/cuelight/youtube/${video}`;
-}
 
 export function registerIntegrationTools(server: McpServer, auth: AuthInfo, options: IntegrationOptions): void {
   if (!Array.isArray(auth.extra?.roles) || !auth.extra.roles.includes('mars-2027')) return;
@@ -59,20 +50,19 @@ export function registerIntegrationTools(server: McpServer, auth: AuthInfo, opti
   }
   const guarded = <T,>(fn: (args: T) => Promise<unknown>) => async (args: T) => {
     try { return result(await fn(args)); } catch (error) {
-      return failure(error instanceof Error && /^(Upstream HTTP \d+|Integration is not configured|Node name .*)$/.test(error.message)
+      return failure(error instanceof Error && /^(Upstream HTTP \d+|Integration is not configured|Node name .*|Video .*|Unsupported video URL)$/.test(error.message)
         ? error.message : 'Integration request failed');
     }
   };
   server.registerTool('cuelight_nodes', { description: 'List addressable Cuelight nodes by human name.', inputSchema: {} }, guarded(async () => ({ nodes: await nodes() })));
-  server.registerTool('cuelight_play', { description: 'Play a web or YouTube URL on one uniquely named Cuelight node. Returns the assigned generation and a bounded player-report confirmation; playing means the web renderer reports playing, not independently verified video frames.',
+  server.registerTool('cuelight_play', { description: 'Download and upload a video URL (MP4 H264/AAC, 720p, maximum 900 seconds/256 MiB), or assign an unsupported non-video web page. Bounded download: metadata 30 seconds plus file 120 seconds. Returns generation and fresh player acknowledgement.',
     inputSchema: { node: z.string().min(1).max(200), url: z.string().url().refine(value => {
       const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password;
     }) } }, guarded(async ({ node, url }) => {
     const matches = (await nodes()).filter(item => item.name.toLowerCase() === node.toLowerCase());
     if (matches.length !== 1) throw new Error('Node name must match exactly one node');
     const target = matches[0]!;
-    const media = z.object({ id: z.string() })
-      .parse(await cuelight('/media', 'POST', { kind: 'web', url: playbackUrl(url, options.playbackBaseUrl!), title: `Mars · ${url}` }));
+    const media = await videoMedia(url, options, cuelight, send, options.cuelightUrl, options.cuelightToken);
     const assignment = z.object({ desiredGeneration: z.number(), releaseDigest: z.string() }).passthrough().parse(await cuelight(`/nodes/${encodeURIComponent(target.id)}/assignment`, 'PUT',
       { mediaId: media.id, expectedGeneration: target.desiredGeneration, deliveryMode: 'stream' },
       { 'Idempotency-Key': randomUUID(), 'If-Match': `"generation:${target.desiredGeneration}"` }));
@@ -101,7 +91,7 @@ export function registerIntegrationTools(server: McpServer, auth: AuthInfo, opti
       if (Date.now() >= deadline) break;
       await delay(1000);
     } while (Date.now() < deadline);
-    return { node: target, url, playbackUrl: playbackUrl(url, options.playbackBaseUrl!), mediaId: media.id,
+    return { node: target, url, mediaId: media.id, mediaKind: media.kind, mediaDigest: media.artifact?.digest,
       assignedGeneration: assignment.desiredGeneration, assignment, playing, player, reportError };
   }));
 

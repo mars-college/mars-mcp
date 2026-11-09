@@ -51,16 +51,25 @@ All integration tools require the `mars-2027` community role. Set `CUELIGHT_URL`
 to the control origin and `CUELIGHT_TOKEN` to a supported operator token scoped
 to `node_read,assignment_read,assignment_write,media_read,media_write`.
 `cuelight_nodes` lists human-readable node names. `cuelight_play {node,url}`
-requires a unique case-insensitive exact name, creates/reuses a web media item,
-and assigns it with generation/If-Match concurrency protection. HTTP(S) URLs
-are supported; YouTube watch/share/shorts/live URLs become muted autoplay embeds
-inside a minimal page hosted at the issuer's `/cuelight/youtube/:video` route.
-This supplies YouTube's required HTTP Referer (a bare embed gives error 153).
-The result includes `assignedGeneration`, the assignment and a player report,
-waiting up to ten seconds for a matching generation, release digest and fresh
-`playing` report. `playing: false` means unconfirmed, not a failed assignment.
-For web content this confirms the renderer, not video frame progression; use a
-screen capture for visual proof. No Cuelight source modification is required.
+requires a unique case-insensitive exact name and assigns with generation/If-Match
+concurrency protection. Video URLs are extracted using the operator's pinned
+`CUELIGHT_YT_DLP` executable, downloaded as H264/AAC MP4 (maximum 720p,
+900 seconds and 256 MiB), uploaded through Cuelight's resumable upload API,
+and stored as **file** media. Source-URL tags and content digests reuse existing
+library media. Extractor failures are errors, never disguised as web playback;
+only explicitly unsupported URLs retain the web-item path.
+Set `CUELIGHT_VIDEO_SCRATCH` to a private service state directory and
+`CUELIGHT_FFMPEG` to the ffmpeg executable. Scratch files are removed on success
+and failure. Install a pinned yt-dlp release in the service data directory,
+verify its release SHA-256, and configure its absolute path in private runtime env.
+No system-wide install or Cuelight source modification is required.
+Downloads block with bounded subprocess timeouts (30 seconds metadata,
+120 seconds download, 210-second import deadline checked before requests);
+each upload request is bounded to 15 seconds. The result
+includes media kind/digest, assigned generation and a player report, waiting up
+to ten seconds for matching fresh generation/release-digest/playing confirmation.
+`playing: false` means unconfirmed, not a failed assignment. Actual renderer
+screenshots are required to prove advancing video frames.
 
 Set `MARS_GATEWAY_URL` to the private gateway origin and `MARS_GATEWAY_TOKEN`
 to its shared bearer. `characters_list`, `character_create`, `character_update`,

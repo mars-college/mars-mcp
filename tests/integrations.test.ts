@@ -4,7 +4,20 @@ import { createServer } from 'node:http';
 import { createApp } from '../src/app.js';
 import { hash } from '../src/auth-store.js';
 import type { AuthConfig } from '../src/auth-types.js';
-import { playbackUrl } from '../src/integrations.js';
+import { mkdtemp, writeFile, chmod, rm, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { videoMedia } from '../src/cuelight-video.js';
+import { createHash } from 'node:crypto';
+
+async function fakeExtractor(t: { after: (fn: () => Promise<void>) => void }, behavior: string) {
+  const dir = await mkdtemp(join(tmpdir(), 'mars-video-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binary = join(dir, 'yt-dlp');
+  await writeFile(binary, `#!/usr/bin/env node\nconst fs=require('node:fs');const a=process.argv.slice(2);\n${behavior}\n`);
+  await chmod(binary, 0o700);
+  return { ytDlpPath: binary, videoScratchDir: join(dir, 'scratch') };
+}
 
 const config: AuthConfig = { issuer: 'http://127.0.0.1:4400', resource: 'http://127.0.0.1:4400/mcp', databasePath: ':memory:', discordClientId: '', discordClientSecret: '', discordGuildId: '', roleMap: {}, sessionTtl: 900,
   servicePrincipals: [{ name: 'fixture', tokenSha256: hash('fixture-bearer'), roles: ['demo-reader', 'mars-2027'] }, { name: 'empty', tokenSha256: hash('empty-bearer'), roles: [] }] };
@@ -28,6 +41,7 @@ test('service bearers accept hashes, reject unknowns, filter roles and cannot pu
 });
 
 test('Cuelight fake assigns web media by unique human name and forwards generation', async t => {
+  const videoOptions = await fakeExtractor(t, "console.error('Unsupported URL: fixture');process.exit(1)");
   let reportUnavailable = false;
   const calls: { url: string; method?: string; body?: unknown }[] = [];
   const fake: typeof fetch = async (input, init) => {
@@ -36,11 +50,12 @@ test('Cuelight fake assigns web media by unique human name and forwards generati
     const url = String(input); calls.push({ url, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     if (reportUnavailable && url.endsWith('/status')) return new Response('', { status: 503 });
     return Response.json(url.includes('/nodes?') ? { items: [{ id: 'test-node', name: 'Fixture Screen', desiredGeneration: 7 }], page: {} }
-      : url.endsWith('/media') ? { id: 'web-media' }
+      : url.includes('/media?') ? { items: [], page: {} }
+      : url.endsWith('/media') ? { id: 'web-media', kind: 'web' }
       : url.endsWith('/status') ? { observedGeneration: 8, reportedAt: new Date().toISOString(), renderingReleaseDigest: 'digest', currentContent: { state: 'playing', releaseDigest: 'digest' } }
       : { mediaId: 'web-media', desiredGeneration: 8, releaseDigest: 'digest' });
   };
-  const { app, store } = createApp(config, { cuelightUrl: 'https://cuelight.invalid', cuelightToken: 'scoped', fetchIntegration: fake });
+  const { app, store } = createApp(config, { ...videoOptions, cuelightUrl: 'https://cuelight.invalid', cuelightToken: 'scoped', fetchIntegration: fake });
   const server = createServer(app).listen(0, '127.0.0.1'); await new Promise<void>(r => server.once('listening', r));
   t.after(() => { server.close(); store.close(); }); const address = server.address(); assert(address && typeof address !== 'string');
   const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { Authorization: 'Bearer fixture-bearer', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'cuelight_play', arguments: { node: 'fixture screen', url: 'https://www.youtube.com/watch?v=fixture' } } }) });
@@ -55,17 +70,52 @@ test('Cuelight fake assigns web media by unique human name and forwards generati
   assert.match(unconfirmedText, /\\?"playing\\?":false/);
   assert.match(unconfirmedText, /assignment succeeded but playback is unconfirmed/);
   const wrapper = await fetch(`http://127.0.0.1:${address.port}/cuelight/youtube/jfKfPfyJRdk`);
-  assert.equal(wrapper.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
-  assert.match(await wrapper.text(), /youtube.com\/embed\/jfKfPfyJRdk\?autoplay=1/);
+  assert.equal(wrapper.status, 404);
   assert.equal((await fetch(`http://127.0.0.1:${address.port}/cuelight/youtube/not-valid`)).status, 404);
 });
 
-test('YouTube playback URLs are autoplay embeds while other web URLs stay intact', () => {
-  for (const url of ['https://www.youtube.com/watch?v=jfKfPfyJRdk', 'https://youtu.be/jfKfPfyJRdk', 'https://youtube.com/shorts/jfKfPfyJRdk', 'https://youtube.com/live/jfKfPfyJRdk']) {
-    assert.equal(playbackUrl(url, 'https://mars.invalid'), 'https://mars.invalid/cuelight/youtube/jfKfPfyJRdk');
-  }
-  assert.equal(playbackUrl('https://example.com/', 'https://mars.invalid'), 'https://example.com/');
-  assert.equal(playbackUrl('https://youtube.com.evil.invalid/watch?v=jfKfPfyJRdk', 'https://mars.invalid'), 'https://youtube.com.evil.invalid/watch?v=jfKfPfyJRdk');
+test('video importer uploads real bytes, reuses source and digest, cleans scratch', async t => {
+  const options = await fakeExtractor(t, `if(a.includes('--dump-single-json')) console.log(JSON.stringify({duration:30,title:'Fixture'}));else fs.writeFileSync(a[a.indexOf('-o')+1],'fixture-video');`);
+  let media: { id: string; kind: string; tags?: string[]; artifact: { digest: string } } | undefined;
+  let uploads = 0;
+  const request = async (path: string, method?: string, raw?: unknown) => {
+    const body = raw as { length?: number; kind: string; assetId: string; tags: string[]; playback: unknown };
+    if (path.includes('/media?')) return { items: media ? [media] : [], page: {} };
+    if (path === '/uploads') { uploads++; assert.equal(body.length, 13); return { id: 'upload' }; }
+    if (path.endsWith('/complete')) return { id: 'asset' };
+    assert.equal(path, '/media'); assert.equal(body.kind, 'file'); assert.equal(body.assetId, 'asset');
+    assert.deepEqual(body.playback, { fit: 'fit', loop: true, muted: true, volume: 0, orientation: 0 });
+    media = { ...body, id: 'uploaded-media', artifact: { digest: 'digest' } }; return media;
+  };
+  const send: typeof fetch = async (_input, init) => {
+    assert.equal(new Headers(init?.headers).get('Upload-Offset'), '0');
+    assert.equal(Buffer.from(init?.body as Uint8Array).toString(), 'fixture-video');
+    return new Response(null, { status: 204 });
+  };
+  const first = await videoMedia('https://video.invalid/fixture', options, request, send, 'https://cuelight.invalid', 'scoped');
+  assert.equal(first.kind, 'file'); assert.equal(first.id, 'uploaded-media');
+  assert.equal((await videoMedia('https://video.invalid/fixture', options, request, send)).id, first.id);
+  assert.equal(uploads, 1);
+  assert.deepEqual(await readdir(options.videoScratchDir), []);
+  media = { id: 'same-digest', kind: 'file', artifact: { digest: createHash('sha256').update('fixture-video').digest('hex') } };
+  assert.equal((await videoMedia('https://video.invalid/other', options, request, send)).id, 'same-digest');
+  assert.equal(uploads, 1);
+});
+
+for (const [name, behavior, expected] of [
+  ['oversize', `console.log(JSON.stringify({duration:30,filesize:300*1024*1024}))`, /Video size exceeds/],
+  ['duration', `console.log(JSON.stringify({duration:901}))`, /Video duration exceeds/],
+  ['extractor failure', `console.error('unavailable');process.exit(1)`, /Video extractor failed/],
+] as const) test(`video importer rejects ${name} without uploading`, async t => {
+  const options = await fakeExtractor(t, behavior);
+  const request = async () => ({ items: [], page: {} });
+  await assert.rejects(videoMedia('https://video.invalid/fixture', options, request, fetch), expected);
+});
+
+test('video importer rejects oversized downloaded file and cleans scratch', async t => {
+  const options = await fakeExtractor(t, `if(a.includes('--dump-single-json'))console.log(JSON.stringify({duration:30}));else {const p=a[a.indexOf('-o')+1];fs.writeFileSync(p,'x');fs.truncateSync(p,257*1024*1024);}`);
+  await assert.rejects(videoMedia('https://video.invalid/fixture', options, async () => ({ items: [], page: {} }), fetch), /Video size exceeds/);
+  assert.deepEqual(await readdir(options.videoScratchDir), []);
 });
 
 test('puppet tools use authenticated numeric Discord subject and gateway bearer for every operation', async t => {
