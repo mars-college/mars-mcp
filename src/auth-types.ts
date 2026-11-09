@@ -9,6 +9,7 @@ export interface AuthConfig {
   discordGuildId: string;
   roleMap: Record<string, string>;
   sessionTtl: number;
+  servicePrincipals?: { name: string; tokenSha256: string; roles: string[] }[];
 }
 
 export interface Principal {

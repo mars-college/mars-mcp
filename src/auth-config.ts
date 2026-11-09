@@ -1,6 +1,18 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AuthConfig } from './auth-types.js';
+import { z } from 'zod';
+
+const ServicePrincipals = z.array(z.object({
+  name: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
+  tokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  roles: z.array(z.string().regex(/^[a-zA-Z0-9:_-]{1,80}$/)),
+}).strict()).superRefine((values, ctx) => {
+  if (new Set(values.map(value => value.name)).size !== values.length
+      || new Set(values.map(value => value.tokenSha256)).size !== values.length) {
+    ctx.addIssue({ code: 'custom', message: 'Service names and token hashes must be unique' });
+  }
+});
 
 export function loadAuthConfig(publicUrl: string): AuthConfig {
   const url = new URL(publicUrl);
@@ -28,6 +40,7 @@ export function loadAuthConfig(publicUrl: string): AuthConfig {
     discordClientSecret: process.env.DISCORD_CLIENT_SECRET || '',
     discordGuildId: process.env.DISCORD_GUILD_ID || '',
     roleMap: roleMap as Record<string, string>,
+    servicePrincipals: ServicePrincipals.parse(JSON.parse(process.env.MARS_SERVICE_PRINCIPALS || '[]')),
     sessionTtl: ttl,
   };
 }

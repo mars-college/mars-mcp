@@ -119,6 +119,11 @@ export class MarsAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    const service = this.config.servicePrincipals?.find(value => value.tokenSha256 === hash(token));
+    // SDK bearer middleware requires a numeric expiry; configured services never time out.
+    if (service) return { token, clientId: `service:${service.name}`, scopes: [SCOPE], expiresAt: Number.MAX_SAFE_INTEGER,
+      resource: new URL(this.config.resource),
+      extra: { subject: `service:${service.name}`, roles: [...service.roles] } };
     const entry = this.store.get<StoredAccess>('access', hash(token));
     if (!entry || entry.resource !== this.config.resource || entry.expiresAt <= now()) throw new InvalidTokenError('Invalid or expired access token');
     return { token, clientId: entry.clientId, scopes: entry.scopes, expiresAt: entry.expiresAt,

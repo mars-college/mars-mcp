@@ -2,7 +2,7 @@
 
 An authenticated MCP resource server for members' own agents. Express + TypeScript, official MCP SDK, stateless Streamable HTTP at `/mcp`.
 
-**Current scope:** Discord-backed authorization plus read-only, explicitly role-gated files. With no operator configuration, only the packaged synthetic demonstration is available. Local operators can instead select an external catalog/context root; `list_resources` and `read_resource` expose the same permitted documents as native MCP discovery/reads. `mars_lookup` still returns two introductory facts. No private resource inventory is included.
+**Current scope:** Discord-backed authorization, hashed service principals, explicitly role-gated files, Cuelight URL assignment, and user-owned puppet characters through a private gateway. With no operator configuration, only the packaged synthetic demonstration is available. Local operators select an external catalog/context root; resource tools and native resources expose the same permitted documents. No private resource inventory is included.
 
 ## Local setup
 
@@ -37,6 +37,34 @@ DISCORD_ROLE_MAP={"123456789012345678":"demo-reader","234567890123456789":"organ
 ```
 
 Every accepted guild member gets `member`. Other roles are explicitly mapped; Discord display names are not used. Roles are exposed as `req.auth.extra.roles`, alongside `subject`, `username`, and `membershipAt`, and through `GET /auth/me`. They are not OAuth scopes: the only supported scope is `mars.read`.
+
+### Service principals and integrations
+
+`MARS_SERVICE_PRINCIPALS` is a JSON array of `{name, tokenSha256, roles}`. Generate
+a cryptographically random bearer outside the checkout and store only its SHA-256
+hex digest in this configuration. The bearer authenticates to `/mcp` as
+`service:<name>` with exactly those roles. It does not expire; remove its entry
+and restart to revoke it. It grants no Discord user identity and cannot call the
+puppetmaster tools. Never use a Discord OAuth token as a permanent service token.
+
+All integration tools require the `mars-2027` community role. Set `CUELIGHT_URL`
+to the control origin and `CUELIGHT_TOKEN` to a supported operator token scoped
+to `node_read,assignment_read,assignment_write,media_read,media_write`.
+`cuelight_nodes` lists human-readable node names. `cuelight_play {node,url}`
+requires a unique case-insensitive exact name, creates/reuses a web media item,
+and assigns it with generation/If-Match concurrency protection. HTTP(S) URLs,
+including YouTube watch URLs, are supported. A successful result proves an
+assignment, not that the screen rendered or played the media; check Cuelight
+node status separately. No Cuelight source modification is required.
+
+Set `MARS_GATEWAY_URL` to the private gateway origin and `MARS_GATEWAY_TOKEN`
+to its shared bearer. `characters_list`, `character_create`, `character_update`,
+`character_delete`, `character_say`, and `character_mentions` call its
+`/v1/characters` API. They require an authenticated Discord user. The actor is
+the numeric `req.auth.extra.subject` issued by Discord login, never a caller
+argument. The gateway enforces ownership and permitted output channels.
+Upstream failures are tool errors without exposing credentials or upstream bodies.
+
 
 ## Role-gated file demonstration
 

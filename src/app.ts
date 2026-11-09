@@ -11,12 +11,13 @@ import { authHeaders, authRateLimit } from './auth-http.js';
 import type { AuthConfig } from './auth-types.js';
 import { registerMarsTools } from './tools.js';
 import { loadMarsResources, registerMarsResources, type MarsResourceOptions } from './resources.js';
+import { registerIntegrationTools, integrationEnvironment, type IntegrationOptions } from './integrations.js';
 
 const VERSION = '0.1.0';
 const SERVICE = 'mars-mcp';
 const SCOPES = ['mars.read'];
 
-export function createApp(config: AuthConfig, options: MarsResourceOptions & { fetchDiscord?: typeof fetch } = {}) {
+export function createApp(config: AuthConfig, options: MarsResourceOptions & IntegrationOptions & { fetchDiscord?: typeof fetch } = {}) {
   const catalog = loadMarsResources(options);
   const store = new AuthStore(config.databasePath);
   const provider = new MarsAuthProvider(store, config);
@@ -80,6 +81,7 @@ export function createApp(config: AuthConfig, options: MarsResourceOptions & { f
     const server = new McpServer({ name: SERVICE, version: VERSION }, { capabilities: { tools: {} } });
     registerMarsTools(server);
     registerMarsResources(server, req.auth!, catalog);
+    registerIntegrationTools(server, req.auth!, { ...integrationEnvironment(), ...options });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Deliberately avoid serializing transport exceptions or requests containing secrets.
     transport.onerror = () => console.error(`[${SERVICE}] MCP transport error`);
