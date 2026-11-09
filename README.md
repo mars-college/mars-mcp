@@ -52,10 +52,15 @@ to the control origin and `CUELIGHT_TOKEN` to a supported operator token scoped
 to `node_read,assignment_read,assignment_write,media_read,media_write`.
 `cuelight_nodes` lists human-readable node names. `cuelight_play {node,url}`
 requires a unique case-insensitive exact name, creates/reuses a web media item,
-and assigns it with generation/If-Match concurrency protection. HTTP(S) URLs,
-including YouTube watch URLs, are supported. A successful result proves an
-assignment, not that the screen rendered or played the media; check Cuelight
-node status separately. No Cuelight source modification is required.
+and assigns it with generation/If-Match concurrency protection. HTTP(S) URLs
+are supported; YouTube watch/share/shorts/live URLs become muted autoplay embeds
+inside a minimal page hosted at the issuer's `/cuelight/youtube/:video` route.
+This supplies YouTube's required HTTP Referer (a bare embed gives error 153).
+The result includes `assignedGeneration`, the assignment and a player report,
+waiting up to ten seconds for a matching generation, release digest and fresh
+`playing` report. `playing: false` means unconfirmed, not a failed assignment.
+For web content this confirms the renderer, not video frame progression; use a
+screen capture for visual proof. No Cuelight source modification is required.
 
 Set `MARS_GATEWAY_URL` to the private gateway origin and `MARS_GATEWAY_TOKEN`
 to its shared bearer. `characters_list`, `character_create`, `character_update`,
